@@ -1,0 +1,100 @@
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk17'
+        nodejs 'node16'
+    }
+
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                deleteDir()
+            }
+        }
+        
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main', url: 'https://github.com/Aj7Ay/Netflix-clone.git'
+            }
+        }
+        
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Netflix \
+                    -Dsonar.projectKey=Netflix '''
+                }
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                sh "npm install"
+            }
+        }
+
+        stage('TRIVY File System Scan') {
+            steps {
+                sh "trivy fs . > trivyfs.txt"
+            }
+        }
+
+        stage("Docker Build & Push") {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-hub-secrets', toolName: 'docker') {
+                        sh "docker build --build-arg TMDB_V3_API_KEY=ed102f111ae5621abd9993b65aed2700 -t netflix ."
+                        sh "docker tag netflix elyesbesbes/netflix:tagname"
+                        sh "docker push elyesbesbes/netflix:tagname"
+                    }
+                }
+            }
+        }
+
+        stage("TRIVY Docker Image Scan") {
+            steps {
+                sh "trivy image elyesbesbes/netflix:tagname > trivyimage.txt"
+            }
+        }
+
+        stage('Deploy to container') {
+            steps {
+                sh 'docker run -d --name netflix -p 8081:80 elyesbesbes/netflix:tagname'
+            }
+        }
+        
+        stage('Deploy to kubernets'){
+            steps{
+                script{
+                    dir('Kubernetes') {
+                        withKubeConfig(caCertificate: '', clusterName: '', contextName: '', credentialsId: 'k8s', namespace: '', restrictKubeConfigAccess: false, serverUrl: '') {
+                                sh 'kubectl apply -f deployment.yml'
+                                sh 'kubectl apply -f service.yml'
+                        }   
+                    }
+                }
+            }
+    }
+
+    post {
+        always {
+            emailext(
+                attachLog: true,
+                subject: "'${currentBuild.result}' - Jenkins Build Notification",
+                body: """
+                <p>Project: ${env.JOB_NAME}</p>
+                <p>Build Number: ${env.BUILD_NUMBER}</p>
+                <p>URL: <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
+                <p>Please find the attached Trivy scan reports.</p>
+                """,
+                to: 'besbeselyes0@gmail.com',
+                attachmentsPattern: 'trivyfs.txt, trivyimage.txt'
+            )
+        }
+    }
+}
